@@ -1,0 +1,27 @@
+# Core dependencies
+numpy
+pandas
+
+# KYC & Document Processing
+pillow>=9.0.0  # Image processing
+pytesseract>=0.3.10  # OCR for document processing
+# tesseract-ocr  # System OCR engine (optional, for better performance)
+
+# NLP & AI
+transformers>=4.25.0  # Transformer models for text generation
+torch>=1.10.0  # PyTorch backend for transformers
+google-generativeai>=0.3.0  # Google Gemini API
+
+# Machine Learning for Trading
+scikit-learn>=1.0.0  # ML models for price prediction
+# pandas-ta>=0.3.14b  # Technical analysis indicators
+ta>=0.10.0  # Additional technical analysis
+tqdm>=4.60.0  # Progress bars
+matplotlib>=3.5.0  # Plotting
+seaborn>=0.11.0  # Statistical visualizations
+
+# Data Storage & Serialization
+python-dotenv>=0.19.0  # Environment variables
+
+# Utilities
+requests>=2.28.0  # HTTP requests
