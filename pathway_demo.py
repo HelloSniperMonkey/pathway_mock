@@ -18,7 +18,7 @@ class StreamingStockMonitor:
     
     def __init__(self):
         print("=" * 70)
-        print("🚀 PATHWAY STREAMING DEMO - Real-time Stock Monitoring")
+        print("PATHWAY STREAMING DEMO - Real-time Stock Monitoring")
         print("=" * 70)
     
     def create_sample_stream_data(self):
@@ -40,7 +40,7 @@ class StreamingStockMonitor:
         df = pd.DataFrame(sample_data)
         df.to_csv("streaming_data/stock_prices.csv", index=False)
         
-        print("\n✅ Sample streaming data created: streaming_data/stock_prices.csv")
+        print("\nSample streaming data created: streaming_data/stock_prices.csv")
         return "streaming_data/stock_prices.csv"
     
     def run_static_demo(self):

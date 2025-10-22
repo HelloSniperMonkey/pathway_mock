@@ -141,8 +141,8 @@ class AIPricePredictor:
         X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
         y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
         
-        print(f"📊 Training set: {len(X_train)} samples")
-        print(f"📊 Test set: {len(X_test)} samples")
+        print(f"Training set: {len(X_train)} samples")
+        print(f"Test set: {len(X_test)} samples")
         
         # Scale features
         X_train_scaled = self.scaler.fit_transform(X_train)

@@ -232,7 +232,7 @@ class SupportResponseGenerator:
         report.append("")
 
         # User information
-        report.append("📋 USER INFORMATION:")
+        report.append("USER INFORMATION:")
         report.append(f"  User ID: {profile.user_id}")
         if profile.name:
             report.append(f"  Name: {profile.name}")
@@ -267,7 +267,7 @@ class SupportResponseGenerator:
             report.append("")
 
         # Recommendations
-        report.append("💡 RECOMMENDATIONS:")
+        report.append("RECOMMENDATIONS:")
         expertise = self.determine_profile_level(profile)
         if expertise == "beginner":
             report.append("  • Provide educational resources and guides")

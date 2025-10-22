@@ -143,8 +143,7 @@ def calculate_all_indicators(df):
     Calculate all technical indicators on the dataframe.
     This uses your existing functions - UNCHANGED logic.
     """
-    print("📊 Calculating technical indicators...")
-    
+    print("Calculating technical indicators...")
     # Ichimoku Cloud
     df = ichimoku(df)
     
@@ -188,7 +187,7 @@ def calculate_all_indicators(df):
     df['q05'] = df['v_hawk'].rolling(20).quantile(0.05)
     df['q95'] = df['v_hawk'].rolling(20).quantile(0.95)
     
-    print("✅ All indicators calculated successfully!")
+    print("All indicators calculated successfully!")
     return df
 
 
@@ -201,13 +200,13 @@ def run_ai_prediction_pipeline(csv_file_path, model_type='random_forest'):
         model_type: 'random_forest' or 'gradient_boosting'
     """
     print("\n" + "="*70)
-    print("🚀 AI-POWERED TRADING SYSTEM")
+    print("AI-POWERED TRADING SYSTEM")
     print("="*70)
     
     # Step 1: Load data
     print(f"\n📂 Loading data from: {csv_file_path}")
     df = read_csv_to_dataframe(csv_file_path)
-    print(f"✅ Loaded {len(df)} rows of data")
+    print(f"Loaded {len(df)} rows of data")
     print(f"📅 Date range: {df.index[0]} to {df.index[-1]}")
     
     # Step 2: Calculate all indicators (your existing logic)
@@ -230,7 +229,7 @@ def run_ai_prediction_pipeline(csv_file_path, model_type='random_forest'):
         backtest_results = predictor.backtest_predictions(df)
         
         # Generate plots
-        print("\n📊 Generating performance visualizations...")
+        print("\nGenerating performance visualizations...")
         predictor.plot_results(results, save_path='model_performance.png')
         predictor.plot_price_predictions(backtest_results, save_path='price_predictions.png')
         
@@ -244,7 +243,7 @@ def run_ai_prediction_pipeline(csv_file_path, model_type='random_forest'):
         return predictor, results, backtest_results
         
     except ImportError as e:
-        print(f"\n⚠️  Error importing AI predictor: {e}")
+        print(f"Warning: Error importing AI predictor: {e}")
         print("Make sure ai_price_predictor.py is in the same directory")
         return None, None, None
 
@@ -257,7 +256,7 @@ def main():
     csv_file = "bitcoin.csv"
     
     # if not os.path.exists(csv_file):
-    #     print(f"❌ File not found: {csv_file}")
+    #     print(f"Error: File not found: {csv_file}")
     #     print("Please provide the correct path to your CSV file")
     #     return
     
@@ -269,9 +268,9 @@ def main():
     
     if predictor:
         print("\n" + "="*70)
-        print("✅ AI TRADING SYSTEM COMPLETE!")
+        print("AI TRADING SYSTEM COMPLETE!")
         print("="*70)
-        print("\n📁 Generated Files:")
+        print("\nGenerated Files:")
         print("   • model_performance.png - Model accuracy and feature importance")
         print("   • price_predictions.png - Predicted vs actual prices")
         print("   • prediction_results.csv - Detailed prediction results")

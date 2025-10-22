@@ -4,6 +4,8 @@ Integrates KYC checking and AI customer support systems
 """
 
 import sys
+import os
+import dotenv
 from typing import Optional, Dict, List
 from datetime import datetime
 from pathlib import Path
@@ -31,7 +33,7 @@ class FinancialAIAssistant:
             use_gemini: Whether to use Google Gemini API
             gemini_key: Google Gemini API key
         """
-        print("🚀 Initializing Financial AI Assistant...")
+        print("Initializing Financial AI Assistant...")
 
         # Initialize KYC components
         self.kyc_parser = KYCDocumentParser()
@@ -47,7 +49,7 @@ class FinancialAIAssistant:
         self.user_profiler = SupportUserProfiler()
         self.response_generator = SupportResponseGenerator(self.nlp_engine)
 
-        print("✅ Assistant initialized successfully!\n")
+        print("Assistant initialized successfully!\n")
 
     def run_kyc_verification(self, documents: List[Dict[str, str]]) -> Dict:
         """
@@ -60,25 +62,25 @@ class FinancialAIAssistant:
             Verification result with status and details
         """
         print("=" * 70)
-        print("🔐 KYC VERIFICATION PROCESS")
+        print("KYC VERIFICATION PROCESS")
         print("=" * 70)
 
         # Parse documents
-        print("\n1️⃣  Parsing documents...")
+        print("\n1. Parsing documents...")
         parsed_docs = self.kyc_parser.parse_multiple_documents(documents)
 
         for i, doc in enumerate(parsed_docs, 1):
             print(f"   Document {i}: {doc.doc_type.value} (Confidence: {doc.confidence:.2%})")
 
         # Perform fraud detection
-        print("\n2️⃣  Performing fraud detection...")
+        print("\n2. Performing fraud detection...")
         fraud_result = self.kyc_fraud_detector.perform_fraud_check(parsed_docs)
 
         # Print fraud report
         print(self.kyc_fraud_detector.generate_fraud_report(fraud_result))
 
         # Store verification
-        print("\n3️⃣  Storing verification record...")
+        print("\n3. Storing verification record...")
         user_id = f"user_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
         verified_data = {}
@@ -98,7 +100,7 @@ class FinancialAIAssistant:
         )
 
         self.kyc_storage.store_kyc_record(kyc_record)
-        print(f"   ✅ Record stored with ID: {user_id}")
+        print(f"   Record stored with ID: {user_id}")
 
         return {
             "user_id": user_id,
@@ -109,7 +111,7 @@ class FinancialAIAssistant:
             "warnings": fraud_result.warnings
         }
 
-    def run_customer_support_session(self, user_id: str = None) -> None:
+    def run_customer_support_session(self, user_id: Optional[str] = None) -> None:
         """
         Run interactive customer support session
         
@@ -117,7 +119,7 @@ class FinancialAIAssistant:
             user_id: Optional existing user ID
         """
         print("\n" + "=" * 70)
-        print("💬 AI-POWERED CUSTOMER SUPPORT SYSTEM")
+        print("AI-POWERED CUSTOMER SUPPORT SYSTEM")
         print("=" * 70)
         print("Type 'quit' or 'exit' to end the session")
         print("Type 'profile' to see your profile summary")
@@ -128,7 +130,7 @@ class FinancialAIAssistant:
         if user_id:
             profile = self.user_profiler.load_profile(user_id)
             if not profile:
-                print(f"⚠️  User {user_id} not found. Creating new profile.\n")
+                print(f"Warning: User {user_id} not found. Creating new profile.\n")
                 profile = None
         else:
             profile = None
@@ -138,28 +140,28 @@ class FinancialAIAssistant:
         while True:
             try:
                 # Get user input
-                user_input = input("📝 You: ").strip()
+                user_input = input("You: ").strip()
 
                 if not user_input:
                     continue
 
                 # Check for commands
                 if user_input.lower() in ['quit', 'exit']:
-                    print("\n👋 Thank you for using Financial AI Assistant. Goodbye!")
+                    print("\nThank you for using Financial AI Assistant. Goodbye!")
                     break
 
                 if user_input.lower() == 'profile':
                     if profile:
                         print("\n" + self.user_profiler.get_profile_summary(profile) + "\n")
                     else:
-                        print("⚠️  No profile data yet. Start by asking a financial question!\n")
+                        print("Warning: No profile data yet. Start by asking a financial question!\n")
                     continue
 
                 if user_input.lower() == 'report':
                     if profile:
                         print("\n" + self.response_generator.generate_summary_report(profile) + "\n")
                     else:
-                        print("⚠️  No profile data yet. Start by asking a financial question!\n")
+                        print("Warning: No profile data yet. Start by asking a financial question!\n")
                     continue
 
                 # Create or update profile
@@ -175,10 +177,10 @@ class FinancialAIAssistant:
                     profile
                 )
 
-                print(f"\n🤖 Assistant:\n{contextual_response['response']}\n")
+                print(f"\nAssistant:\n{contextual_response['response']}\n")
 
-                if contextual_response['follow_up_questions']:
-                    print("💭 You might also want to know:")
+                if contextual_response.get('follow_up_questions'):
+                    print("You might also want to know:")
                     print(contextual_response['follow_up_questions'])
                     print()
 
@@ -189,22 +191,22 @@ class FinancialAIAssistant:
                     self.user_profiler.save_profile(profile)
 
             except KeyboardInterrupt:
-                print("\n\n👋 Session interrupted. Goodbye!")
+                print("\n\nSession interrupted. Goodbye!")
                 if profile:
                     self.user_profiler.save_profile(profile)
                 break
             except Exception as e:
-                print(f"❌ Error: {e}\n")
+                print(f"Error: {e}\n")
 
         # Final save
         if profile:
             self.user_profiler.save_profile(profile)
-            print(f"📁 Profile saved with ID: {profile.user_id}")
+            print(f"Profile saved with ID: {profile.user_id}")
 
     def demonstrate_kyc(self) -> None:
         """Demonstrate KYC verification with sample data"""
         print("\n" + "=" * 70)
-        print("📋 KYC VERIFICATION DEMO")
+        print("KYC VERIFICATION DEMO")
         print("=" * 70 + "\n")
 
         # Sample documents
@@ -232,7 +234,7 @@ class FinancialAIAssistant:
 
         result = self.run_kyc_verification(sample_documents)
 
-        print("\n✅ KYC Verification Result:")
+        print("\nKYC Verification Result:")
         print(f"   Status: {result['status']}")
         print(f"   User ID: {result['user_id']}")
         print(f"   Fraud Detected: {result['fraud_detected']}")
@@ -241,7 +243,7 @@ class FinancialAIAssistant:
     def demonstrate_support(self) -> None:
         """Demonstrate customer support with sample queries"""
         print("\n" + "=" * 70)
-        print("💬 CUSTOMER SUPPORT DEMO")
+        print("CUSTOMER SUPPORT DEMO")
         print("=" * 70 + "\n")
 
         sample_queries = [
@@ -270,24 +272,24 @@ class FinancialAIAssistant:
 
         # Save profile
         self.user_profiler.save_profile(profile)
-        print(f"✅ Demo profile saved with ID: {user_id}\n")
+        print(f"Demo profile saved with ID: {user_id}\n")
 
     def show_statistics(self) -> None:
         """Show system statistics"""
         print("\n" + "=" * 70)
-        print("📊 SYSTEM STATISTICS")
+        print("SYSTEM STATISTICS")
         print("=" * 70)
 
         # KYC Statistics
         kyc_stats = self.kyc_storage.get_statistics()
-        print(f"\n🔐 KYC Verifications:")
+        print(f"\nKYC Verifications:")
         print(f"   Pending: {kyc_stats['pending']}")
         print(f"   Verified: {kyc_stats['verified']}")
         print(f"   Total: {kyc_stats['total']}")
 
         # OCR Capability
         ocr_capability = self.kyc_extractor.validate_ocr_capability()
-        print(f"\n🖼️  OCR Capabilities:")
+        print(f"\nOCR Capabilities:")
         print(f"   Pytesseract Available: {ocr_capability['pytesseract_available']}")
         print(f"   PIL Available: {ocr_capability['pil_available']}")
         print(f"   OCR Enabled: {ocr_capability['ocr_enabled']}")
@@ -298,7 +300,7 @@ class FinancialAIAssistant:
         """Show interactive menu"""
         while True:
             print("=" * 70)
-            print("🏦 FINANCIAL AI ASSISTANT - MAIN MENU")
+            print("FINANCIAL AI ASSISTANT - MAIN MENU")
             print("=" * 70)
             print("1. Run KYC Verification Demo")
             print("2. Run Customer Support Demo")
@@ -318,20 +320,22 @@ class FinancialAIAssistant:
             elif choice == "4":
                 self.show_statistics()
             elif choice == "5":
-                print("\n👋 Thank you for using Financial AI Assistant!")
+                print("\nThank you for using Financial AI Assistant!")
                 break
             else:
-                print("❌ Invalid option. Please try again.\n")
+                print("Invalid option. Please try again.\n")
 
 
 def main():
     """Main entry point"""
-    print("\n" + "🏦" * 35)
+    print("\n" + "=" * 70)
     print("FINANCIAL AI ASSISTANT - KYC & CUSTOMER SUPPORT")
-    print("🏦" * 35 + "\n")
+    print("=" * 70 + "\n")
+
+    dotenv.load_dotenv()
 
     # Create assistant
-    assistant = FinancialAIAssistant(use_gemini=True, gemini_key="YOUR_GEMINI_API_KEY")  # Set to True if using OpenAI
+    assistant = FinancialAIAssistant(use_gemini=True, gemini_key=os.getenv("GEMINI_API_KEY"))  # Set to True if using OpenAI
 
     # Run interactive menu
     assistant.interactive_menu()

@@ -50,10 +50,10 @@ def demo_kyc_basic() -> None:
 
     result = assistant.run_kyc_verification(documents)
 
-    print("\n📊 Results:")
+    print("\nResults:")
     print(f"  User ID: {result['user_id']}")
     print(f"  Status: {result['status']}")
-    print(f"  Fraud Detected: {'Yes ⚠️' if result['fraud_detected'] else 'No ✓'}")
+    print(f"  Fraud Detected: {'Yes' if result['fraud_detected'] else 'No'}")
     print(f"  Risk Level: {result['fraud_confidence']:.2%}")
 
 
@@ -90,7 +90,7 @@ def demo_kyc_fraud() -> None:
     result = assistant.run_kyc_verification(documents)
 
     if result['fraud_detected']:
-        print("\n⚠️  FRAUD INDICATORS DETECTED!")
+        print("\nFRAUD INDICATORS DETECTED!")
         print("Details:")
         for warning in result['warnings']:
             print(f"  • {warning}")
@@ -140,11 +140,11 @@ def demo_full_workflow() -> None:
     print_config()
 
     if not validate_config():
-        print("⚠️  Configuration validation failed. Continuing anyway...\n")
+        print("Warning: Configuration validation failed. Continuing anyway...\n")
 
     print("\nStep 2: Initialize assistant")
     assistant = FinancialAIAssistant()
-    print("✅ Assistant initialized\n")
+    print("Assistant initialized\n")
 
     print("\nStep 3: Run KYC demo")
     input("Press Enter to continue...")
@@ -162,7 +162,7 @@ def demo_full_workflow() -> None:
     input("Press Enter to continue...")
     demo_customer_support()
 
-    print_header("✅ WORKFLOW COMPLETE")
+    print_header("WORKFLOW COMPLETE")
 
 
 def run_quick_test() -> None:
@@ -173,7 +173,7 @@ def run_quick_test() -> None:
         # Test 1: Initialize
         print("Test 1: Initializing assistant...")
         assistant = FinancialAIAssistant()
-        print("✅ Pass\n")
+        print("Pass\n")
 
         # Test 2: KYC
         print("Test 2: Testing KYC module...")
@@ -181,7 +181,7 @@ def run_quick_test() -> None:
         parser = KYCDocumentParser()
         doc_type = parser.detect_document_type("PAN: ABCDE1234F")
         assert doc_type.value == "pan"
-        print("✅ Pass\n")
+        print("Pass\n")
 
         # Test 3: User Profiler
         print("Test 3: Testing user profiler...")
@@ -189,7 +189,7 @@ def run_quick_test() -> None:
         profiler = SupportUserProfiler()
         name = profiler.extract_name("My name is John Smith")
         assert name == "John Smith"
-        print("✅ Pass\n")
+        print("Pass\n")
 
         # Test 4: NLP Engine
         print("Test 4: Testing NLP engine...")
@@ -197,16 +197,16 @@ def run_quick_test() -> None:
         engine = SupportNLPEngine()
         intent, conf = engine.detect_intent("I want to invest in stocks")
         assert intent == "investment"
-        print("✅ Pass\n")
+        print("Pass\n")
 
         print("=" * 70)
-        print("✅ ALL TESTS PASSED")
+        print("ALL TESTS PASSED")
         print("=" * 70 + "\n")
 
     except AssertionError as e:
-        print(f"❌ Test failed: {e}\n")
+        print(f"Test failed: {e}\n")
     except Exception as e:
-        print(f"❌ Error: {e}\n")
+        print(f"Error: {e}\n")
 
 
 def main():
@@ -239,18 +239,18 @@ def main():
         choice = input("Select option (1-8): ").strip()
 
         if choice == "8":
-            print("\n👋 Thanks for using the demo suite!")
+            print("\nThanks for using the demo suite!")
             break
         elif choice in menu_options:
             try:
                 _, func = menu_options[choice]
                 func()
             except KeyboardInterrupt:
-                print("\n\n⏹️  Demo interrupted by user\n")
+                print("\n\nDemo interrupted by user\n")
             except Exception as e:
-                print(f"\n❌ Error: {e}\n")
+                print(f"\nError: {e}\n")
         else:
-            print("❌ Invalid option. Please try again.\n")
+            print("Invalid option. Please try again.\n")
 
         input("\nPress Enter to return to menu...")
 
