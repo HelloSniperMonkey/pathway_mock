@@ -191,7 +191,7 @@ def calculate_all_indicators(df):
     return df
 
 
-def run_ai_prediction_pipeline(csv_file_path, model_type='random_forest'):
+def run_ai_prediction_pipeline(csv_file_path, model_type='gradient_boosting'):
     """
     Complete pipeline: Load data -> Calculate indicators -> Train AI -> Predict
     

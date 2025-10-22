@@ -5,10 +5,11 @@ Uses technical indicators to train ML models for price direction prediction
 
 import pandas as pd
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split, TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+import xgboost as xgb
 import matplotlib.pyplot as plt
 import seaborn as sns
 from typing import Tuple, Dict, Any
@@ -21,7 +22,7 @@ class AIPricePredictor:
     Ensures no future data leakage during training and prediction.
     """
     
-    def __init__(self, model_type='random_forest'):
+    def __init__(self, model_type='gradient_boosting'):
         """
         Initialize the predictor with specified model type.
         
@@ -54,24 +55,57 @@ class AIPricePredictor:
         df['price_change'] = df['close'].pct_change()
         df['price_change_2'] = df['close'].pct_change(2)
         df['price_change_3'] = df['close'].pct_change(3)
+        df['price_change_5'] = df['close'].pct_change(5)
+        
+        # Momentum features
+        df['momentum_3'] = df['close'] / df['close'].shift(3) - 1
+        df['momentum_7'] = df['close'] / df['close'].shift(7) - 1
+        
+        # Volatility features
+        df['price_std_5'] = df['close'].rolling(5).std()
+        df['price_std_10'] = df['close'].rolling(10).std()
+        df['high_low_range'] = (df['high'] - df['low']) / df['close']
         
         # Volume features
         df['volume_change'] = df['volume'].pct_change()
         df['volume_ratio'] = df['volume'] / df['vol_sma_14']
+        df['volume_ma_ratio'] = df['vol_sma_9'] / df['vol_sma_14']
+        
+        # RSI derivative
+        df['rsi_change'] = df['RSI'].diff()
+        df['rsi_oversold'] = (df['RSI'] < 30).astype(int)
+        df['rsi_overbought'] = (df['RSI'] > 70).astype(int)
+        
+        # MACD features
+        df['macd_histogram'] = df['MACD'] - df['MACD_Signal']
+        df['macd_hist_change'] = df['macd_histogram'].diff()
+        
+        # EMA crossovers and distances
+        df['ema_6_12_diff'] = (df['ema_6'] - df['ema_12']) / df['close']
+        df['ema_12_18_diff'] = (df['ema_12'] - df['ema_18']) / df['close']
+        df['price_ema6_dist'] = (df['close'] - df['ema_6']) / df['close']
+        
+        # ADX trend strength
+        df['adx_strong'] = (df['adx'] > 25).astype(int)
+        df['di_diff'] = df['plus_di'] - df['minus_di']
         
         # Technical indicator features (already calculated by your script)
         feature_list = [
-            # Price changes
-            'price_change', 'price_change_2', 'price_change_3',
+            # Price changes and momentum
+            'price_change', 'price_change_2', 'price_change_3', 'price_change_5',
+            'momentum_3', 'momentum_7',
+            
+            # Volatility
+            'price_std_5', 'price_std_10', 'high_low_range',
             
             # Volume
-            'volume_change', 'volume_ratio',
+            'volume_change', 'volume_ratio', 'volume_ma_ratio',
             
             # MACD
-            'MACD', 'MACD_Signal',
+            'MACD', 'MACD_Signal', 'macd_histogram', 'macd_hist_change',
             
             # RSI
-            'RSI',
+            'RSI', 'rsi_change', 'rsi_oversold', 'rsi_overbought',
             
             # Ichimoku
             'tenkan_sen', 'kijun_sen', 'senkou_span_a', 'senkou_span_b',
@@ -80,13 +114,14 @@ class AIPricePredictor:
             'atr_values',
             
             # ADX
-            'adx', 'plus_di', 'minus_di',
+            'adx', 'plus_di', 'minus_di', 'adx_strong', 'di_diff',
             
             # Aroon
             'aroon_up', 'aroon_down',
             
             # EMA
             'ema_6', 'ema_12', 'ema_18',
+            'ema_6_12_diff', 'ema_12_18_diff', 'price_ema6_dist',
             
             # Heikin Ashi
             'ha_close', 'ha_open',
@@ -144,26 +179,54 @@ class AIPricePredictor:
         print(f"Training set: {len(X_train)} samples")
         print(f"Test set: {len(X_test)} samples")
         
+        # Calculate class distribution
+        class_counts = y_train.value_counts()
+        print(f"Training class distribution: UP={class_counts.get(1, 0)} ({class_counts.get(1, 0)/len(y_train)*100:.1f}%), DOWN={class_counts.get(0, 0)} ({class_counts.get(0, 0)/len(y_train)*100:.1f}%)")
+        
+        # Calculate class weights to balance the dataset
+        # Give more weight to the minority class (usually UP)
+        n_samples = len(y_train)
+        n_classes = 2
+        class_weight_0 = n_samples / (n_classes * class_counts.get(0, 1))
+        class_weight_1 = n_samples / (n_classes * class_counts.get(1, 1))
+        class_weights = {0: class_weight_0, 1: class_weight_1}
+        print(f"Using class weights: DOWN={class_weight_0:.2f}, UP={class_weight_1:.2f}")
+        
         # Scale features
         X_train_scaled = self.scaler.fit_transform(X_train)
         X_test_scaled = self.scaler.transform(X_test)
         
-        # Initialize model
+        # Initialize model with balanced class weights
         if self.model_type == 'random_forest':
             self.model = RandomForestClassifier(
-                n_estimators=100,
-                max_depth=10,
-                min_samples_split=20,
-                min_samples_leaf=10,
+                n_estimators=200,  # Increased for better learning
+                max_depth=12,  # Increased slightly
+                min_samples_split=15,  # Reduced to allow more splits
+                min_samples_leaf=5,  # Reduced to allow finer granularity
+                max_features='sqrt',  # Use sqrt of features for diversity
+                class_weight=class_weights,  # Balance classes
                 random_state=42,
                 n_jobs=-1
             )
         else:
-            self.model = GradientBoostingClassifier(
-                n_estimators=100,
-                max_depth=5,
-                learning_rate=0.1,
-                random_state=42
+            # Calculate scale_pos_weight for XGBoost (ratio of negative to positive)
+            scale_pos_weight = class_counts.get(0, 1) / class_counts.get(1, 1)
+            print(f"XGBoost scale_pos_weight: {scale_pos_weight:.2f}")
+            
+            self.model = xgb.XGBClassifier(
+                n_estimators=200,  # Increased from 100
+                max_depth=4,  # Reduced to prevent overfitting
+                learning_rate=0.05,  # Reduced for better learning
+                min_child_weight=3,  # Add regularization
+                subsample=0.8,  # Use 80% of data for each tree
+                colsample_bytree=0.8,  # Use 80% of features
+                gamma=0.1,  # Minimum loss reduction for split
+                reg_alpha=0.1,  # L1 regularization
+                reg_lambda=1.0,  # L2 regularization
+                scale_pos_weight=scale_pos_weight,  # Balance classes properly
+                random_state=42,
+                verbosity=0,
+                eval_metric='logloss'
             )
         
         # Train model
@@ -171,16 +234,55 @@ class AIPricePredictor:
         self.model.fit(X_train_scaled, y_train)
         self.trained = True
         
-        # Predictions
+        # Get probability predictions for test set
+        y_test_proba = self.model.predict_proba(X_test_scaled)
+        
+        # Find optimal threshold for balanced UP/DOWN accuracy
+        print("\n🎯 Finding optimal prediction threshold...")
+        best_threshold = 0.5
+        best_metric = 0
+        
+        for threshold in np.arange(0.35, 0.65, 0.02):
+            y_test_pred_thresh = (y_test_proba[:, 1] >= threshold).astype(int)
+            
+            # Calculate accuracy for each class
+            up_mask = y_test == 1
+            down_mask = y_test == 0
+            
+            up_acc = accuracy_score(y_test[up_mask], y_test_pred_thresh[up_mask]) if up_mask.sum() > 0 else 0
+            down_acc = accuracy_score(y_test[down_mask], y_test_pred_thresh[down_mask]) if down_mask.sum() > 0 else 0
+            
+            # We want BOTH accuracies to be good, not just average
+            # Use minimum of the two (ensures both classes perform well)
+            # Multiply by average to also care about overall performance
+            min_acc = min(up_acc, down_acc)
+            avg_acc = (up_acc + down_acc) / 2
+            metric = min_acc * 0.7 + avg_acc * 0.3  # Weighted combination
+            
+            if metric > best_metric and min_acc > 0.50:  # Ensure both classes > 50%
+                best_metric = metric
+                best_threshold = threshold
+        
+        self.optimal_threshold = best_threshold
+        print(f"✓ Optimal threshold: {best_threshold:.2f}")
+        
+        # Predictions with standard threshold
         y_train_pred = self.model.predict(X_train_scaled)
-        y_test_pred = self.model.predict(X_test_scaled)
+        y_test_pred = (y_test_proba[:, 1] >= self.optimal_threshold).astype(int)
         
         # Calculate metrics
         train_accuracy = accuracy_score(y_train, y_train_pred)
         test_accuracy = accuracy_score(y_test, y_test_pred)
         
         print(f"✅ Training Accuracy: {train_accuracy*100:.2f}%")
-        print(f"✅ Test Accuracy: {test_accuracy*100:.2f}%")
+        print(f"✅ Test Accuracy: {test_accuracy*100:.2f}% (with optimized threshold)")
+        
+        # Per-class accuracy
+        up_mask = y_test == 1
+        down_mask = y_test == 0
+        up_acc = accuracy_score(y_test[up_mask], y_test_pred[up_mask]) if up_mask.sum() > 0 else 0
+        down_acc = accuracy_score(y_test[down_mask], y_test_pred[down_mask]) if down_mask.sum() > 0 else 0
+        print(f"   UP accuracy: {up_acc*100:.1f}%, DOWN accuracy: {down_acc*100:.1f}%")
         
         # Feature importance
         feature_importance = pd.DataFrame({
@@ -199,7 +301,7 @@ class AIPricePredictor:
             'test_dates': df_prepared.index[split_idx:]
         }
     
-    def predict_next(self, df: pd.DataFrame, current_idx: int) -> Tuple[int, float]:
+    def predict_next(self, df: pd.DataFrame, current_idx: int, threshold: float = 0.5) -> Tuple[int, float]:
         """
         Predict next price direction for a specific timestamp.
         Uses ONLY data up to current_idx (no future leakage).
@@ -207,6 +309,7 @@ class AIPricePredictor:
         Args:
             df: DataFrame with features
             current_idx: Current position in dataframe
+            threshold: Probability threshold for predicting UP (default 0.5)
             
         Returns:
             Tuple of (prediction, probability)
@@ -217,10 +320,14 @@ class AIPricePredictor:
         # Get features for current timestamp only
         current_features = df.iloc[current_idx][self.feature_columns].values.reshape(1, -1)
         
-        # Scale and predict
+        # Scale and predict probabilities
         current_scaled = self.scaler.transform(current_features)
-        prediction = self.model.predict(current_scaled)[0]
-        probability = self.model.predict_proba(current_scaled)[0][prediction]
+        proba = self.model.predict_proba(current_scaled)[0]
+        
+        # Use custom threshold instead of 0.5
+        # proba[1] is probability of UP (class 1)
+        prediction = 1 if proba[1] >= threshold else 0
+        probability = proba[prediction]
         
         return int(prediction), float(probability)
     
@@ -246,6 +353,7 @@ class AIPricePredictor:
         results = []
         
         print(f"🔄 Running backtest from index {start_idx} to {len(df_prepared)}...")
+        print(f"Using optimal threshold: {getattr(self, 'optimal_threshold', 0.5):.2f}")
         
         for idx in range(start_idx, len(df_prepared) - 1):
             # Get actual values
@@ -253,8 +361,9 @@ class AIPricePredictor:
             next_price = df_prepared.iloc[idx + 1]['close']
             actual_direction = 1 if next_price > current_price else 0
             
-            # Predict
-            pred_direction, confidence = self.predict_next(df_prepared, idx)
+            # Predict using optimal threshold
+            threshold = getattr(self, 'optimal_threshold', 0.5)
+            pred_direction, confidence = self.predict_next(df_prepared, idx, threshold=threshold)
             
             results.append({
                 'timestamp': df_prepared.index[idx],

@@ -296,30 +296,83 @@ class FinancialAIAssistant:
 
         print("\n" + "=" * 70 + "\n")
 
+    def demonstrate_trading_ai(self) -> None:
+        """Demonstrate AI-powered stock price prediction (Task 2)"""
+        print("\n" + "=" * 70)
+        print("AI-POWERED STOCK PRICE PREDICTION DEMO (TASK 2)")
+        print("=" * 70 + "\n")
+
+        try:
+            # Import trading modules
+            from integrated_ai_trading import run_ai_prediction_pipeline
+            
+            print("Running AI price prediction on Bitcoin historical data...")
+            print("This demonstrates Task 2: Real-time AI-driven stock price prediction\n")
+            
+            # Run the AI prediction pipeline
+            csv_file = "bitcoin.csv"
+            
+            if not os.path.exists(csv_file):
+                print(f"Error: {csv_file} not found in workspace.")
+                print("Please ensure bitcoin.csv is present to run the trading AI demo.\n")
+                return
+            
+            # Run prediction with Random Forest model
+            print("Training AI model on historical data...")
+            predictor, results, backtest_results = run_ai_prediction_pipeline(
+                csv_file,
+                model_type='random_forest'
+            )
+            
+            if results and results.get('success'):
+                print("\n" + "=" * 70)
+                print("PREDICTION RESULTS")
+                print("=" * 70)
+                print(f"Model Type: {results['model_type'].upper()}")
+                print(f"Training Accuracy: {results['training_accuracy']*100:.2f}%")
+                print(f"Test Accuracy: {results['test_accuracy']*100:.2f}%")
+                print(f"Backtest Accuracy: {results['backtest_accuracy']*100:.2f}%")
+                print("\nVisualization files generated:")
+                print(f"  - {results['performance_plot']}")
+                print(f"  - {results['prediction_plot']}")
+                print(f"\nDetailed results saved to: {results['csv']}")
+                print("=" * 70 + "\n")
+            else:
+                print("Error: Prediction pipeline failed.\n")
+                
+        except ImportError as e:
+            print(f"Error: Could not import trading modules: {e}")
+            print("Please ensure ai_price_predictor.py and integrated_ai_trading.py are present.\n")
+        except Exception as e:
+            print(f"Error during trading AI demo: {e}\n")
+
     def interactive_menu(self) -> None:
         """Show interactive menu"""
         while True:
             print("=" * 70)
             print("FINANCIAL AI ASSISTANT - MAIN MENU")
             print("=" * 70)
-            print("1. Run KYC Verification Demo")
-            print("2. Run Customer Support Demo")
-            print("3. Start Interactive Support Session")
-            print("4. Show System Statistics")
-            print("5. Exit")
+            print("1. Run KYC Verification Demo (Task 3)")
+            print("2. Run AI Stock Price Prediction Demo (Task 2)")
+            print("3. Run Customer Support Demo (Task 4)")
+            print("4. Start Interactive Support Session")
+            print("5. Show System Statistics")
+            print("6. Exit")
             print("=" * 70)
 
-            choice = input("Select an option (1-5): ").strip()
+            choice = input("Select an option (1-6): ").strip()
 
             if choice == "1":
                 self.demonstrate_kyc()
             elif choice == "2":
-                self.demonstrate_support()
+                self.demonstrate_trading_ai()
             elif choice == "3":
-                self.run_customer_support_session()
+                self.demonstrate_support()
             elif choice == "4":
-                self.show_statistics()
+                self.run_customer_support_session()
             elif choice == "5":
+                self.show_statistics()
+            elif choice == "6":
                 print("\nThank you for using Financial AI Assistant!")
                 break
             else:
@@ -329,13 +382,14 @@ class FinancialAIAssistant:
 def main():
     """Main entry point"""
     print("\n" + "=" * 70)
-    print("FINANCIAL AI ASSISTANT - KYC & CUSTOMER SUPPORT")
+    print("FINANCIAL AI ASSISTANT - COMPLETE SOLUTION")
+    print("Task 2: AI Stock Price Prediction | Task 3: KYC | Task 4: Support")
     print("=" * 70 + "\n")
 
     dotenv.load_dotenv()
 
     # Create assistant
-    assistant = FinancialAIAssistant(use_gemini=True, gemini_key=os.getenv("GEMINI_API_KEY"))  # Set to True if using OpenAI
+    assistant = FinancialAIAssistant(use_gemini=True, gemini_key=os.getenv("GEMINI_API_KEY"))
 
     # Run interactive menu
     assistant.interactive_menu()
