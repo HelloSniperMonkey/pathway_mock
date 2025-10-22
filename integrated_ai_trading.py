@@ -22,9 +22,12 @@ def read_csv_to_dataframe(file_path):
     
     # Parse ISO8601 format
     df['timestamp'] = pd.to_datetime(df['timestamp'], format='ISO8601')
-    
+
     df = df[df.high != df.low]
     df.set_index("timestamp", inplace=True)
+
+    # Sort once index is set so training observes past → future order
+    df = df.sort_index()
     return df
 
 def ichimoku(df):
@@ -191,13 +194,16 @@ def calculate_all_indicators(df):
     return df
 
 
-def run_ai_prediction_pipeline(csv_file_path, model_type='gradient_boosting'):
+def run_ai_prediction_pipeline(csv_file_path, model_type='gradient_boosting', 
+                               prediction_horizon=3, target_type='direction'):
     """
     Complete pipeline: Load data -> Calculate indicators -> Train AI -> Predict
     
     Args:
         csv_file_path: Path to your CSV file
-        model_type: 'random_forest' or 'gradient_boosting'
+        model_type: 'random_forest', 'gradient_boosting', or 'logistic'
+        prediction_horizon: Number of periods ahead to predict (default: 3)
+        target_type: 'direction', 'bucket', or 'threshold'
     """
     print("\n" + "="*70)
     print("AI-POWERED TRADING SYSTEM")
@@ -218,11 +224,15 @@ def run_ai_prediction_pipeline(csv_file_path, model_type='gradient_boosting'):
         
         # Initialize AI model
         print(f"\n🤖 Initializing {model_type} AI model...")
-        predictor = AIPricePredictor(model_type=model_type)
+        predictor = AIPricePredictor(
+            model_type=model_type,
+            prediction_horizon=prediction_horizon,
+            target_type=target_type
+        )
         
-        # Train model
+        # Train model with walk-forward validation
         print("\n📚 Training AI model on historical data...")
-        results = predictor.train(df, test_size=0.2)
+        results = predictor.train(df, n_splits=5)
         
         # Run backtest
         print("\n🔄 Running backtest predictions...")
@@ -260,10 +270,12 @@ def main():
     #     print("Please provide the correct path to your CSV file")
     #     return
     
-    # Run the complete pipeline
+    # Run the complete pipeline with improved settings
     predictor, results, backtest_results = run_ai_prediction_pipeline(
         csv_file,
-        model_type='random_forest'  # Can also use 'gradient_boosting'
+        model_type='gradient_boosting',  # Options: 'gradient_boosting', 'random_forest', 'logistic'
+        prediction_horizon=3,  # Predict 3 days ahead (less noisy than 1 day)
+        target_type='direction'  # Options: 'direction', 'bucket', 'threshold'
     )
     
     if predictor:

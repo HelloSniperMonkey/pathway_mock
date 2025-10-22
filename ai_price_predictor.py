@@ -9,6 +9,9 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split, TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+from sklearn.linear_model import LogisticRegression
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.feature_selection import SelectFromModel
 import xgboost as xgb
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -22,14 +25,18 @@ class AIPricePredictor:
     Ensures no future data leakage during training and prediction.
     """
     
-    def __init__(self, model_type='gradient_boosting'):
+    def __init__(self, model_type='random_forest', prediction_horizon=3, target_type='direction'):
         """
         Initialize the predictor with specified model type.
         
         Args:
-            model_type: 'random_forest' or 'gradient_boosting'
+            model_type: 'random_forest', 'gradient_boosting', or 'logistic'
+            prediction_horizon: Number of periods ahead to predict (default: 3)
+            target_type: 'direction' (binary), 'bucket' (3-class: down/flat/up), or 'threshold' (move > 2%)
         """
         self.model_type = model_type
+        self.prediction_horizon = prediction_horizon
+        self.target_type = target_type
         self.model = None
         self.scaler = StandardScaler()
         self.feature_columns = []
@@ -48,8 +55,24 @@ class AIPricePredictor:
         """
         df = df.copy()
         
-        # Target: Next candle direction (1=up, 0=down)
-        df['target'] = (df['close'].shift(-1) > df['close']).astype(int)
+        # Calculate future price based on horizon
+        future_close = df['close'].shift(-self.prediction_horizon)
+        price_change_pct = ((future_close - df['close']) / df['close']) * 100
+        
+        # Create target based on type
+        if self.target_type == 'direction':
+            # Binary: up (1) or down (0) over horizon
+            df['target'] = (future_close > df['close']).astype(int)
+        elif self.target_type == 'bucket':
+            # 3-class: significant down (0), flat (1), significant up (2)
+            df['target'] = pd.cut(price_change_pct, 
+                                 bins=[-np.inf, -1.0, 1.0, np.inf], 
+                                 labels=[0, 1, 2]).astype(int)
+        elif self.target_type == 'threshold':
+            # Binary: significant move > 2% (1) or not (0)
+            df['target'] = (price_change_pct.abs() > 2.0).astype(int)
+        else:
+            raise ValueError(f"Unknown target_type: {self.target_type}")
         
         # Price-based features (using only past data)
         df['price_change'] = df['close'].pct_change()
@@ -153,29 +176,66 @@ class AIPricePredictor:
         
         return df
     
-    def train(self, df: pd.DataFrame, test_size: float = 0.2) -> Dict[str, Any]:
+    def train(self, df: pd.DataFrame, n_splits: int = 5) -> Dict[str, Any]:
         """
-        Train the model using time-series split (no future data leakage).
+        Train the model using walk-forward time-series cross-validation.
         
         Args:
             df: DataFrame with features prepared
-            test_size: Proportion of data for testing
+            n_splits: Number of walk-forward splits for validation
             
         Returns:
             Dictionary with training metrics
         """
         print("🤖 Preparing features for AI model training...")
+        print(f"📊 Prediction horizon: {self.prediction_horizon} periods ahead")
+        print(f"🎯 Target type: {self.target_type}")
         df_prepared = self.prepare_features(df)
         
         # Features and target
         X = df_prepared[self.feature_columns]
         y = df_prepared['target']
         
-        # Time-series split (maintains temporal order)
-        split_idx = int(len(X) * (1 - test_size))
-        X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
-        y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
+        print(f"\n🔄 Using walk-forward validation with {n_splits} splits...")
         
+        # Walk-forward time series split
+        tscv = TimeSeriesSplit(n_splits=n_splits)
+        cv_scores = []
+        
+        # Use last split for final test
+        splits = list(tscv.split(X))
+        train_idx, test_idx = splits[-1]
+        
+        # Cross-validation on earlier splits
+        print("📈 Cross-validation scores:")
+        for i, (train_i, val_i) in enumerate(splits[:-1]):
+            X_cv_train, X_cv_val = X.iloc[train_i], X.iloc[val_i]
+            y_cv_train, y_cv_val = y.iloc[train_i], y.iloc[val_i]
+            
+            # Quick model for CV
+            temp_scaler = StandardScaler()
+            X_cv_train_scaled = temp_scaler.fit_transform(X_cv_train)
+            X_cv_val_scaled = temp_scaler.transform(X_cv_val)
+            
+            if self.model_type == 'logistic':
+                temp_model = LogisticRegression(max_iter=1000, random_state=42)
+            elif self.model_type == 'gradient_boosting':
+                temp_model = xgb.XGBClassifier(n_estimators=100, max_depth=3, random_state=42, verbosity=0)
+            else:
+                temp_model = RandomForestClassifier(n_estimators=100, max_depth=8, random_state=42, n_jobs=-1)
+            
+            temp_model.fit(X_cv_train_scaled, y_cv_train)
+            cv_score = temp_model.score(X_cv_val_scaled, y_cv_val)
+            cv_scores.append(cv_score)
+            print(f"   Fold {i+1}: {cv_score*100:.2f}%")
+        
+        print(f"   Mean CV Score: {np.mean(cv_scores)*100:.2f}% ± {np.std(cv_scores)*100:.2f}%")
+        
+        # Final train/test split
+        X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+        y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+        
+        print(f"\n📊 Final split:")
         print(f"Training set: {len(X_train)} samples")
         print(f"Test set: {len(X_test)} samples")
         
@@ -196,46 +256,81 @@ class AIPricePredictor:
         X_train_scaled = self.scaler.fit_transform(X_train)
         X_test_scaled = self.scaler.transform(X_test)
         
-        # Initialize model with balanced class weights
+        # Feature selection to reduce variance
+        print("\n🔍 Performing feature selection...")
+        if self.model_type == 'logistic':
+            # Use L1 regularization for feature selection
+            selector_model = LogisticRegression(penalty='l1', solver='liblinear', C=0.1, random_state=42, max_iter=1000)
+            selector_model.fit(X_train_scaled, y_train)
+            selector = SelectFromModel(selector_model, prefit=True, threshold='median')
+        else:
+            # Use tree-based feature importance
+            temp_rf = RandomForestClassifier(n_estimators=50, max_depth=8, random_state=42, n_jobs=-1)
+            temp_rf.fit(X_train_scaled, y_train)
+            selector = SelectFromModel(temp_rf, prefit=True, threshold='median')
+        
+        X_train_selected = selector.transform(X_train_scaled)
+        X_test_selected = selector.transform(X_test_scaled)
+        
+        selected_features = [f for f, selected in zip(self.feature_columns, selector.get_support()) if selected]
+        print(f"✓ Selected {len(selected_features)} features (from {len(self.feature_columns)})")
+        self.selector = selector
+        self.selected_features = selected_features
+        
+        # Initialize model based on type
         if self.model_type == 'random_forest':
-            self.model = RandomForestClassifier(
-                n_estimators=200,  # Increased for better learning
-                max_depth=12,  # Increased slightly
-                min_samples_split=15,  # Reduced to allow more splits
-                min_samples_leaf=5,  # Reduced to allow finer granularity
-                max_features='sqrt',  # Use sqrt of features for diversity
-                class_weight=class_weights,  # Balance classes
+            base_model = RandomForestClassifier(
+                n_estimators=300,
+                max_depth=10,
+                min_samples_split=20,
+                min_samples_leaf=8,
+                max_features='sqrt',
+                class_weight=class_weights,
                 random_state=42,
                 n_jobs=-1
             )
-        else:
-            # Calculate scale_pos_weight for XGBoost (ratio of negative to positive)
+            self.model = base_model
+        elif self.model_type == 'gradient_boosting':
             scale_pos_weight = class_counts.get(0, 1) / class_counts.get(1, 1)
             print(f"XGBoost scale_pos_weight: {scale_pos_weight:.2f}")
             
-            self.model = xgb.XGBClassifier(
-                n_estimators=200,  # Increased from 100
-                max_depth=4,  # Reduced to prevent overfitting
-                learning_rate=0.05,  # Reduced for better learning
-                min_child_weight=3,  # Add regularization
-                subsample=0.8,  # Use 80% of data for each tree
-                colsample_bytree=0.8,  # Use 80% of features
-                gamma=0.1,  # Minimum loss reduction for split
-                reg_alpha=0.1,  # L1 regularization
-                reg_lambda=1.0,  # L2 regularization
-                scale_pos_weight=scale_pos_weight,  # Balance classes properly
+            base_model = xgb.XGBClassifier(
+                n_estimators=300,
+                max_depth=3,
+                learning_rate=0.03,
+                min_child_weight=5,
+                subsample=0.8,
+                colsample_bytree=0.7,
+                gamma=0.2,
+                reg_alpha=0.5,
+                reg_lambda=2.0,
+                scale_pos_weight=scale_pos_weight,
                 random_state=42,
                 verbosity=0,
                 eval_metric='logloss'
             )
+            self.model = base_model
+        else:  # logistic regression
+            base_model = LogisticRegression(
+                penalty='l2',
+                C=0.5,
+                solver='lbfgs',
+                max_iter=1000,
+                class_weight=class_weights,
+                random_state=42
+            )
+            # Calibrate probabilities
+            print("📊 Calibrating logistic regression with Platt scaling...")
+            self.model = CalibratedClassifierCV(base_model, method='sigmoid', cv=3)
+            print("✓ Calibration complete")
         
         # Train model
-        print(f"🚀 Training {self.model_type} model...")
-        self.model.fit(X_train_scaled, y_train)
+        print(f"\n🚀 Training {self.model_type} model on selected features...")
+        self.model.fit(X_train_selected, y_train)
         self.trained = True
         
         # Get probability predictions for test set
-        y_test_proba = self.model.predict_proba(X_test_scaled)
+        y_test_proba = self.model.predict_proba(X_test_selected)
         
         # Find optimal threshold for balanced UP/DOWN accuracy
         print("\n🎯 Finding optimal prediction threshold...")
@@ -266,8 +361,8 @@ class AIPricePredictor:
         self.optimal_threshold = best_threshold
         print(f"✓ Optimal threshold: {best_threshold:.2f}")
         
-        # Predictions with standard threshold
-        y_train_pred = self.model.predict(X_train_scaled)
+        # Predictions with optimized threshold
+        y_train_pred = self.model.predict(X_train_selected)
         y_test_pred = (y_test_proba[:, 1] >= self.optimal_threshold).astype(int)
         
         # Calculate metrics
@@ -285,20 +380,35 @@ class AIPricePredictor:
         print(f"   UP accuracy: {up_acc*100:.1f}%, DOWN accuracy: {down_acc*100:.1f}%")
         
         # Feature importance
-        feature_importance = pd.DataFrame({
-            'feature': self.feature_columns,
-            'importance': self.model.feature_importances_
-        }).sort_values('importance', ascending=False)
+        if hasattr(self.model, 'feature_importances_'):
+            feature_importance = pd.DataFrame({
+                'feature': self.selected_features,
+                'importance': self.model.feature_importances_
+            }).sort_values('importance', ascending=False)
+        else:
+            # For logistic regression (CalibratedClassifierCV)
+            base_estimator = self.model.calibrated_classifiers_[0].estimator
+            if hasattr(base_estimator, 'coef_'):
+                feature_importance = pd.DataFrame({
+                    'feature': self.selected_features,
+                    'importance': np.abs(base_estimator.coef_[0])
+                }).sort_values('importance', ascending=False)
+            else:
+                feature_importance = pd.DataFrame({
+                    'feature': self.selected_features,
+                    'importance': [0] * len(self.selected_features)
+                })
         
         return {
             'train_accuracy': train_accuracy,
             'test_accuracy': test_accuracy,
+            'cv_scores': cv_scores,
             'feature_importance': feature_importance,
             'classification_report': classification_report(y_test, y_test_pred),
             'confusion_matrix': confusion_matrix(y_test, y_test_pred),
             'y_test': y_test,
             'y_pred': y_test_pred,
-            'test_dates': df_prepared.index[split_idx:]
+            'test_dates': df_prepared.index[test_idx]
         }
     
     def predict_next(self, df: pd.DataFrame, current_idx: int, threshold: float = 0.5) -> Tuple[int, float]:
@@ -318,11 +428,14 @@ class AIPricePredictor:
             raise ValueError("Model must be trained before prediction!")
         
         # Get features for current timestamp only
-        current_features = df.iloc[current_idx][self.feature_columns].values.reshape(1, -1)
+        current_features = np.array(df.iloc[current_idx][self.feature_columns]).reshape(1, -1)
         
-        # Scale and predict probabilities
+        # Scale and apply feature selection
         current_scaled = self.scaler.transform(current_features)
-        proba = self.model.predict_proba(current_scaled)[0]
+        current_selected = self.selector.transform(current_scaled)
+        
+        # Predict probabilities
+        proba = self.model.predict_proba(current_selected)[0]
         
         # Use custom threshold instead of 0.5
         # proba[1] is probability of UP (class 1)
@@ -355,11 +468,25 @@ class AIPricePredictor:
         print(f"🔄 Running backtest from index {start_idx} to {len(df_prepared)}...")
         print(f"Using optimal threshold: {getattr(self, 'optimal_threshold', 0.5):.2f}")
         
-        for idx in range(start_idx, len(df_prepared) - 1):
-            # Get actual values
-            current_price = df_prepared.iloc[idx]['close']
-            next_price = df_prepared.iloc[idx + 1]['close']
-            actual_direction = 1 if next_price > current_price else 0
+        for idx in range(start_idx, len(df_prepared) - self.prediction_horizon):
+            # Get actual values at prediction horizon
+            current_price = float(df_prepared.iloc[idx]['close'])
+            future_price = float(df_prepared.iloc[idx + self.prediction_horizon]['close'])
+            
+            # Determine actual outcome based on target type
+            if self.target_type == 'direction':
+                actual_direction = 1 if future_price > current_price else 0
+            elif self.target_type == 'bucket':
+                price_change_pct = ((future_price - current_price) / current_price) * 100
+                if price_change_pct < -1.0:
+                    actual_direction = 0
+                elif price_change_pct > 1.0:
+                    actual_direction = 2
+                else:
+                    actual_direction = 1
+            else:  # threshold
+                price_change_pct = abs((future_price - current_price) / current_price) * 100
+                actual_direction = 1 if price_change_pct > 2.0 else 0
             
             # Predict using optimal threshold
             threshold = getattr(self, 'optimal_threshold', 0.5)
@@ -368,7 +495,7 @@ class AIPricePredictor:
             results.append({
                 'timestamp': df_prepared.index[idx],
                 'current_price': current_price,
-                'next_price': next_price,
+                'next_price': future_price,
                 'actual_direction': actual_direction,
                 'predicted_direction': pred_direction,
                 'confidence': confidence,
@@ -497,9 +624,15 @@ class AIPricePredictor:
         print("="*70)
         
         print(f"\n🤖 Model Type: {self.model_type.upper()}")
-        print(f"📈 Number of Features: {len(self.feature_columns)}")
+        print(f"📈 Prediction Horizon: {self.prediction_horizon} periods")
+        print(f"🎯 Target Type: {self.target_type}")
+        print(f"📊 Selected Features: {len(self.selected_features)} (from {len(self.feature_columns)})")
         
         print(f"\n✅ ACCURACY METRICS:")
+        if 'cv_scores' in results:
+            cv_mean = np.mean(results['cv_scores'])
+            cv_std = np.std(results['cv_scores'])
+            print(f"   Cross-Validation:    {cv_mean*100:.2f}% ± {cv_std*100:.2f}%")
         print(f"   Training Accuracy:   {results['train_accuracy']*100:.2f}%")
         print(f"   Testing Accuracy:    {results['test_accuracy']*100:.2f}%")
         
