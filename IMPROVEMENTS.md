@@ -165,6 +165,62 @@ model_type='random_forest'
 
 ---
 
+## 7. Purged Walk-Forward and Embargo (Leakage Safe) ✅
+
+To avoid subtle look-ahead bias when using multi-step-ahead targets, we now:
+- Purge the last H samples from each training fold before validation (H = prediction horizon)
+- Apply a small 2-step embargo at the start of each validation/test split
+
+This ensures no overlap between training and validation labels that could leak future information.
+
+---
+
+## 8. Rolling Normalization for Hawkes (No Distribution Leakage) ✅
+
+ATR is now normalized using a rolling z-score (window=200, min_periods=50) before feeding into the Hawkes process. This prevents using full-series statistics, which can subtly leak the future. Values are clipped to ±5 and NaNs filled.
+
+---
+
+## 9. Abstention (No-Trade) Band + Profit-Aware Optimization ✅
+
+Not all predictions should be traded. We added a configurable no-trade band and optimize it for profit metrics:
+
+- No-trade band around 0.5 (probability): abstain when p_up ∈ (lo, hi)
+- Optimize the (lo, hi) band on the held-out test split for either:
+    - Sharpe ratio (default)
+    - Total return
+- Transaction costs (one-way) are accounted for during optimization
+
+New runtime knobs (also wired via `integrated_ai_trading.py`):
+```python
+optimize_for='sharpe'   # or 'return'
+abstain_band=0.10       # initial width; final band is optimized
+transaction_cost=0.0005 # 5 bps per entry/exit leg
+```
+
+Backtest now reports: trades, step Sharpe, total return, max drawdown, win rate.
+
+---
+
+## 10. Simple Ensemble (RF + XGB + Calibrated Logistic) ✅
+
+Set `model_type='ensemble'` to train three complementary models on a shared, selected feature set. Their predicted probabilities are averaged for more robust signals. Feature importance is aggregated across models (tree importances and logistic coefficients).
+
+Usage:
+```python
+predictor, results, backtest_results = run_ai_prediction_pipeline(
+        'bitcoin.csv',
+        model_type='ensemble',
+        prediction_horizon=3,
+        target_type='direction',
+        optimize_for='sharpe',
+        abstain_band=0.10,
+        transaction_cost=0.0005,
+)
+```
+
+---
+
 ## How to Use
 
 ### Basic Usage (Recommended Settings)

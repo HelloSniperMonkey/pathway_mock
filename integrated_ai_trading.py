@@ -184,9 +184,12 @@ def calculate_all_indicators(df):
     # Aroon
     df = aroon(df, 14)
     
-    # Hawkes process
-    df['norm_range'] = (df['atr_values'] - df['atr_values'].mean()) / df['atr_values'].std()
-    df['v_hawk'] = hawkes_process(df['norm_range'], 1)
+    # Hawkes process (use rolling z-score to avoid future leakage)
+    roll_window = 200
+    atr_mean = df['atr_values'].rolling(window=roll_window, min_periods=50).mean()
+    atr_std = df['atr_values'].rolling(window=roll_window, min_periods=50).std()
+    df['atr_z'] = ((df['atr_values'] - atr_mean) / atr_std).clip(-5, 5).fillna(0)
+    df['v_hawk'] = hawkes_process(df['atr_z'], 1)
     df['q05'] = df['v_hawk'].rolling(20).quantile(0.05)
     df['q95'] = df['v_hawk'].rolling(20).quantile(0.95)
     
@@ -195,7 +198,8 @@ def calculate_all_indicators(df):
 
 
 def run_ai_prediction_pipeline(csv_file_path, model_type='gradient_boosting', 
-                               prediction_horizon=3, target_type='direction'):
+                               prediction_horizon=3, target_type='direction',
+                               optimize_for='accuracy', abstain_band=0.10, transaction_cost=0.0005):
     """
     Complete pipeline: Load data -> Calculate indicators -> Train AI -> Predict
     
@@ -227,7 +231,10 @@ def run_ai_prediction_pipeline(csv_file_path, model_type='gradient_boosting',
         predictor = AIPricePredictor(
             model_type=model_type,
             prediction_horizon=prediction_horizon,
-            target_type=target_type
+            target_type=target_type,
+            optimize_for=optimize_for,
+            abstain_band=abstain_band,
+            transaction_cost=transaction_cost
         )
         
         # Train model with walk-forward validation
@@ -273,9 +280,12 @@ def main():
     # Run the complete pipeline with improved settings
     predictor, results, backtest_results = run_ai_prediction_pipeline(
         csv_file,
-        model_type='gradient_boosting',  # Options: 'gradient_boosting', 'random_forest', 'logistic'
-        prediction_horizon=3,  # Predict 3 days ahead (less noisy than 1 day)
-        target_type='direction'  # Options: 'direction', 'bucket', 'threshold'
+        model_type='neural_net',  # Options: 'ensemble', 'gradient_boosting', 'random_forest', 'logistic'
+        prediction_horizon=6,  # Predict 3 periods ahead
+        target_type='direction',  # Options: 'direction', 'bucket', 'threshold'
+        optimize_for='sharpe',    # Optimize trading band for 'sharpe' or 'accuracy'
+        abstain_band=0.10,        # No-trade zone width around 0.5 (e.g., 0.10 -> lo=0.45 hi=0.55 base; optimized further)
+        transaction_cost=0.0005   # One-way cost per trade (fraction)
     )
     
     if predictor:

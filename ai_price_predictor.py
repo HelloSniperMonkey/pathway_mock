@@ -12,10 +12,11 @@ from sklearn.metrics import accuracy_score, classification_report, confusion_mat
 from sklearn.linear_model import LogisticRegression
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.feature_selection import SelectFromModel
+from sklearn.neural_network import MLPClassifier
 import xgboost as xgb
 import matplotlib.pyplot as plt
 import seaborn as sns
-from typing import Tuple, Dict, Any
+from typing import Tuple, Dict, Any, Optional
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -25,12 +26,13 @@ class AIPricePredictor:
     Ensures no future data leakage during training and prediction.
     """
     
-    def __init__(self, model_type='random_forest', prediction_horizon=3, target_type='direction'):
+    def __init__(self, model_type='random_forest', prediction_horizon=3, target_type='direction',
+                 optimize_for: str = 'accuracy', abstain_band: float = 0.0, transaction_cost: float = 0.0005):
         """
         Initialize the predictor with specified model type.
         
         Args:
-            model_type: 'random_forest', 'gradient_boosting', or 'logistic'
+            model_type: 'random_forest', 'gradient_boosting', 'logistic', 'neural_net', or 'ensemble'
             prediction_horizon: Number of periods ahead to predict (default: 3)
             target_type: 'direction' (binary), 'bucket' (3-class: down/flat/up), or 'threshold' (move > 2%)
         """
@@ -41,6 +43,14 @@ class AIPricePredictor:
         self.scaler = StandardScaler()
         self.feature_columns = []
         self.trained = False
+        # Trading/post-processing config
+        self.optimize_for = optimize_for  # 'accuracy' or 'sharpe'
+        self.abstain_band = max(0.0, min(0.49, float(abstain_band)))  # symmetric band around 0.5
+        self.transaction_cost = max(0.0, float(transaction_cost))  # per trade (one-way) as fraction
+        # Thresholds for trading actions (set after training)
+        self.optimal_threshold = 0.5
+        self.trade_hi = 0.5 + self.abstain_band / 2.0
+        self.trade_lo = 0.5 - self.abstain_band / 2.0
         
     def prepare_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -175,230 +185,298 @@ class AIPricePredictor:
         df = df.dropna(subset=self.feature_columns + ['target'])
         
         return df
+
+    def _predict_proba(self, X_selected: np.ndarray) -> np.ndarray:
+        """
+        Internal helper to get class probabilities from the trained model(s).
+        Supports ensemble averaging when model_type == 'ensemble'.
+        """
+        if self.model_type == 'ensemble':
+            probs = []
+            for m in self.ensemble_models.values():
+                probs.append(m.predict_proba(X_selected))
+            # Average probabilities across models
+            return np.mean(probs, axis=0)
+        else:
+            return self.model.predict_proba(X_selected)
     
     def train(self, df: pd.DataFrame, n_splits: int = 5) -> Dict[str, Any]:
         """
         Train the model using walk-forward time-series cross-validation.
-        
-        Args:
-            df: DataFrame with features prepared
-            n_splits: Number of walk-forward splits for validation
-            
-        Returns:
-            Dictionary with training metrics
         """
         print("🤖 Preparing features for AI model training...")
         print(f"📊 Prediction horizon: {self.prediction_horizon} periods ahead")
         print(f"🎯 Target type: {self.target_type}")
         df_prepared = self.prepare_features(df)
-        
+
         # Features and target
         X = df_prepared[self.feature_columns]
         y = df_prepared['target']
-        
+
         print(f"\n🔄 Using walk-forward validation with {n_splits} splits...")
-        
-        # Walk-forward time series split
         tscv = TimeSeriesSplit(n_splits=n_splits)
         cv_scores = []
-        
-        # Use last split for final test
+        purge = max(1, int(self.prediction_horizon))
+        embargo = min(2, purge)
+
         splits = list(tscv.split(X))
         train_idx, test_idx = splits[-1]
-        
-        # Cross-validation on earlier splits
+
         print("📈 Cross-validation scores:")
         for i, (train_i, val_i) in enumerate(splits[:-1]):
-            X_cv_train, X_cv_val = X.iloc[train_i], X.iloc[val_i]
-            y_cv_train, y_cv_val = y.iloc[train_i], y.iloc[val_i]
-            
-            # Quick model for CV
+            cutoff = val_i[0] - purge
+            train_i_purged = train_i[train_i < cutoff]
+            val_i_emb = val_i[embargo:] if len(val_i) > embargo else val_i
+            X_cv_train, X_cv_val = X.iloc[train_i_purged], X.iloc[val_i_emb]
+            y_cv_train, y_cv_val = y.iloc[train_i_purged], y.iloc[val_i_emb]
+
             temp_scaler = StandardScaler()
             X_cv_train_scaled = temp_scaler.fit_transform(X_cv_train)
             X_cv_val_scaled = temp_scaler.transform(X_cv_val)
-            
+
             if self.model_type == 'logistic':
                 temp_model = LogisticRegression(max_iter=1000, random_state=42)
-            elif self.model_type == 'gradient_boosting':
+            elif self.model_type in ('gradient_boosting', 'ensemble'):
                 temp_model = xgb.XGBClassifier(n_estimators=100, max_depth=3, random_state=42, verbosity=0)
+            elif self.model_type == 'neural_net':
+                temp_model = MLPClassifier(hidden_layer_sizes=(64, 32), activation='relu',
+                                           alpha=1e-4, learning_rate_init=1e-3,
+                                           max_iter=200, early_stopping=True,
+                                           n_iter_no_change=10, validation_fraction=0.1,
+                                           random_state=42)
             else:
                 temp_model = RandomForestClassifier(n_estimators=100, max_depth=8, random_state=42, n_jobs=-1)
-            
+
             temp_model.fit(X_cv_train_scaled, y_cv_train)
             cv_score = temp_model.score(X_cv_val_scaled, y_cv_val)
             cv_scores.append(cv_score)
             print(f"   Fold {i+1}: {cv_score*100:.2f}%")
-        
+
         print(f"   Mean CV Score: {np.mean(cv_scores)*100:.2f}% ± {np.std(cv_scores)*100:.2f}%")
-        
-        # Final train/test split
-        X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
-        y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
-        
+
+        # Final split with purge and embargo
+        final_cutoff = test_idx[0] - purge
+        train_idx_purged = train_idx[train_idx < final_cutoff]
+        test_idx_emb = test_idx[embargo:] if len(test_idx) > embargo else test_idx
+        X_train, X_test = X.iloc[train_idx_purged], X.iloc[test_idx_emb]
+        y_train, y_test = y.iloc[train_idx_purged], y.iloc[test_idx_emb]
+
         print(f"\n📊 Final split:")
         print(f"Training set: {len(X_train)} samples")
         print(f"Test set: {len(X_test)} samples")
-        
-        # Calculate class distribution
+
         class_counts = y_train.value_counts()
         print(f"Training class distribution: UP={class_counts.get(1, 0)} ({class_counts.get(1, 0)/len(y_train)*100:.1f}%), DOWN={class_counts.get(0, 0)} ({class_counts.get(0, 0)/len(y_train)*100:.1f}%)")
-        
-        # Calculate class weights to balance the dataset
-        # Give more weight to the minority class (usually UP)
+
         n_samples = len(y_train)
         n_classes = 2
         class_weight_0 = n_samples / (n_classes * class_counts.get(0, 1))
         class_weight_1 = n_samples / (n_classes * class_counts.get(1, 1))
         class_weights = {0: class_weight_0, 1: class_weight_1}
         print(f"Using class weights: DOWN={class_weight_0:.2f}, UP={class_weight_1:.2f}")
-        
-        # Scale features
+
+        # Scale and select features
         X_train_scaled = self.scaler.fit_transform(X_train)
         X_test_scaled = self.scaler.transform(X_test)
-        
-        # Feature selection to reduce variance
+
         print("\n🔍 Performing feature selection...")
         if self.model_type == 'logistic':
-            # Use L1 regularization for feature selection
             selector_model = LogisticRegression(penalty='l1', solver='liblinear', C=0.1, random_state=42, max_iter=1000)
             selector_model.fit(X_train_scaled, y_train)
             selector = SelectFromModel(selector_model, prefit=True, threshold='median')
         else:
-            # Use tree-based feature importance
             temp_rf = RandomForestClassifier(n_estimators=50, max_depth=8, random_state=42, n_jobs=-1)
             temp_rf.fit(X_train_scaled, y_train)
             selector = SelectFromModel(temp_rf, prefit=True, threshold='median')
-        
+
         X_train_selected = selector.transform(X_train_scaled)
         X_test_selected = selector.transform(X_test_scaled)
-        
-        selected_features = [f for f, selected in zip(self.feature_columns, selector.get_support()) if selected]
-        print(f"✓ Selected {len(selected_features)} features (from {len(self.feature_columns)})")
         self.selector = selector
-        self.selected_features = selected_features
-        
-        # Initialize model based on type
+        self.selected_features = [f for f, s in zip(self.feature_columns, selector.get_support()) if s]
+        print(f"✓ Selected {len(self.selected_features)} features (from {len(self.feature_columns)})")
+
+        # Train model(s)
         if self.model_type == 'random_forest':
-            base_model = RandomForestClassifier(
-                n_estimators=300,
-                max_depth=10,
-                min_samples_split=20,
-                min_samples_leaf=8,
-                max_features='sqrt',
-                class_weight=class_weights,
-                random_state=42,
-                n_jobs=-1
+            self.model = RandomForestClassifier(
+                n_estimators=300, max_depth=10, min_samples_split=20, min_samples_leaf=8,
+                max_features='sqrt', class_weight=class_weights, random_state=42, n_jobs=-1
             )
-            self.model = base_model
+            self.model.fit(X_train_selected, y_train)
         elif self.model_type == 'gradient_boosting':
             scale_pos_weight = class_counts.get(0, 1) / class_counts.get(1, 1)
-            print(f"XGBoost scale_pos_weight: {scale_pos_weight:.2f}")
-            
-            base_model = xgb.XGBClassifier(
-                n_estimators=300,
-                max_depth=3,
-                learning_rate=0.03,
-                min_child_weight=5,
-                subsample=0.8,
-                colsample_bytree=0.7,
-                gamma=0.2,
-                reg_alpha=0.5,
-                reg_lambda=2.0,
-                scale_pos_weight=scale_pos_weight,
-                random_state=42,
-                verbosity=0,
-                eval_metric='logloss'
+            self.model = xgb.XGBClassifier(
+                n_estimators=300, max_depth=3, learning_rate=0.03, min_child_weight=5,
+                subsample=0.8, colsample_bytree=0.7, gamma=0.2, reg_alpha=0.5, reg_lambda=2.0,
+                scale_pos_weight=scale_pos_weight, random_state=42, verbosity=0, eval_metric='logloss'
             )
-            self.model = base_model
-        else:  # logistic regression
-            base_model = LogisticRegression(
-                penalty='l2',
-                C=0.5,
-                solver='lbfgs',
-                max_iter=1000,
-                class_weight=class_weights,
-                random_state=42
+            self.model.fit(X_train_selected, y_train)
+        elif self.model_type == 'neural_net':
+            # Neural network classifier (MLP)
+            # Use sample weights derived from class weights to handle imbalance
+            try:
+                sample_weights = y_train.map(class_weights).values
+            except Exception:
+                # Fallback: uniform weights if mapping fails
+                sample_weights = None
+            self.model = MLPClassifier(
+                hidden_layer_sizes=(128, 64), activation='relu', solver='adam',
+                alpha=1e-4, learning_rate_init=1e-3, max_iter=500, early_stopping=True,
+                n_iter_no_change=15, validation_fraction=0.12, random_state=42
             )
-            # Calibrate probabilities
-            print("📊 Calibrating logistic regression with Platt scaling...")
+            # Some sklearn versions accept sample_weight for MLPClassifier.fit; pass if available
+            try:
+                if sample_weights is not None:
+                    self.model.fit(X_train_selected, y_train, sample_weight=sample_weights)
+                else:
+                    self.model.fit(X_train_selected, y_train)
+            except TypeError:
+                # If sample_weight isn't supported by the installed sklearn version
+                self.model.fit(X_train_selected, y_train)
+        elif self.model_type == 'ensemble':
+            rf_model = RandomForestClassifier(
+                n_estimators=300, max_depth=10, min_samples_split=20, min_samples_leaf=8,
+                max_features='sqrt', class_weight=class_weights, random_state=42, n_jobs=-1
+            )
+            rf_model.fit(X_train_selected, y_train)
+            scale_pos_weight = class_counts.get(0, 1) / class_counts.get(1, 1)
+            xgb_model = xgb.XGBClassifier(
+                n_estimators=300, max_depth=3, learning_rate=0.03, min_child_weight=5,
+                subsample=0.8, colsample_bytree=0.7, gamma=0.2, reg_alpha=0.5, reg_lambda=2.0,
+                scale_pos_weight=scale_pos_weight, random_state=42, verbosity=0, eval_metric='logloss'
+            )
+            xgb_model.fit(X_train_selected, y_train)
+            base_lr = LogisticRegression(penalty='l2', C=0.05, solver='lbfgs', max_iter=10000, class_weight=class_weights, random_state=42)
+            lr_model = CalibratedClassifierCV(base_lr, method='sigmoid', cv=3)
+            lr_model.fit(X_train_selected, y_train)
+            self.ensemble_models = {'rf': rf_model, 'xgb': xgb_model, 'logit': lr_model}
+            self.model = None
+        else:
+            base_model = LogisticRegression(penalty='l2', C=0.05, solver='lbfgs', max_iter=10000, class_weight=class_weights, random_state=82)
             self.model = CalibratedClassifierCV(base_model, method='sigmoid', cv=3)
-            print("✓ Calibration complete")
-        
-        # Train model
-        print(f"\n🚀 Training {self.model_type} model on selected features...")
-        self.model.fit(X_train_selected, y_train)
+            self.model.fit(X_train_selected, y_train)
+
         self.trained = True
-        
-        # Get probability predictions for test set
-        y_test_proba = self.model.predict_proba(X_test_selected)
-        
-        # Find optimal threshold for balanced UP/DOWN accuracy
-        print("\n🎯 Finding optimal prediction threshold...")
+
+        # Probabilities for test set
+        y_test_proba = self._predict_proba(X_test_selected)
+
+        # Classification threshold optimization (balanced)
+        print("\n🎯 Optimizing thresholds...")
         best_threshold = 0.5
-        best_metric = 0
-        
+        best_metric = 0.0
         for threshold in np.arange(0.35, 0.65, 0.02):
             y_test_pred_thresh = (y_test_proba[:, 1] >= threshold).astype(int)
-            
-            # Calculate accuracy for each class
             up_mask = y_test == 1
             down_mask = y_test == 0
-            
             up_acc = accuracy_score(y_test[up_mask], y_test_pred_thresh[up_mask]) if up_mask.sum() > 0 else 0
             down_acc = accuracy_score(y_test[down_mask], y_test_pred_thresh[down_mask]) if down_mask.sum() > 0 else 0
-            
-            # We want BOTH accuracies to be good, not just average
-            # Use minimum of the two (ensures both classes perform well)
-            # Multiply by average to also care about overall performance
             min_acc = min(up_acc, down_acc)
             avg_acc = (up_acc + down_acc) / 2
-            metric = min_acc * 0.7 + avg_acc * 0.3  # Weighted combination
-            
-            if metric > best_metric and min_acc > 0.50:  # Ensure both classes > 50%
+            metric = min_acc * 0.7 + avg_acc * 0.3
+            if metric > best_metric and min_acc > 0.50:
                 best_metric = metric
                 best_threshold = threshold
-        
         self.optimal_threshold = best_threshold
-        print(f"✓ Optimal threshold: {best_threshold:.2f}")
-        
-        # Predictions with optimized threshold
-        y_train_pred = self.model.predict(X_train_selected)
+        print(f"✓ Optimal classification threshold: {best_threshold:.2f}")
+
+        # Profit-aware trading band optimization
+        close_series = df_prepared['close']
+        test_positions = df_prepared.index[test_idx_emb]
+        fwd_close = close_series.shift(-self.prediction_horizon)
+        fwd_ret = (fwd_close - close_series) / close_series
+        fwd_ret = fwd_ret.reindex(test_positions)
+        proba_up = pd.Series(y_test_proba[:, 1], index=test_positions)
+
+        def evaluate_band(hi: float) -> Tuple[float, Dict[str, float]]:
+            lo = 1.0 - hi
+            actions = proba_up.apply(lambda p: 1 if p >= hi else (-1 if p <= lo else 0))
+            step_returns = actions * fwd_ret
+            action_shift = actions.shift(1).fillna(0)
+            trades = (actions != action_shift) & (actions != 0)
+            costs = trades.astype(float) * self.transaction_cost
+            exits = (actions == 0) & (action_shift != 0)
+            costs += exits.astype(float) * self.transaction_cost
+            net_returns = step_returns.fillna(0) - costs
+            valid_mask = actions != 0
+            n_trades = int(trades.sum())
+            sharpe = float(net_returns.mean() / net_returns.std(ddof=0)) if net_returns.std(ddof=0) > 0 else 0.0
+            cum = (1 + net_returns.fillna(0)).cumprod()
+            peak = cum.cummax()
+            drawdown = float((cum / peak - 1.0).min()) if len(cum) > 0 else 0.0
+            total_return = float(cum.iloc[-1] - 1.0) if len(cum) > 0 else 0.0
+            win_rate = float((net_returns[valid_mask] > 0).mean()) if valid_mask.any() else 0.0
+            avg_trade = float(net_returns[valid_mask].mean()) if valid_mask.any() else 0.0
+            metrics = {'sharpe': sharpe, 'total_return': total_return, 'max_drawdown': drawdown, 'win_rate': win_rate, 'avg_trade_return': avg_trade, 'n_trades': n_trades}
+            objective = sharpe if self.optimize_for == 'sharpe' else total_return
+            return objective, metrics
+
+        best_hi = 0.5 + self.abstain_band / 2.0
+        best_obj = -np.inf
+        best_metrics = None
+        for hi in np.arange(0.52, 0.71, 0.01):
+            obj, mets = evaluate_band(hi)
+            if mets['n_trades'] < 5:
+                continue
+            if obj > best_obj:
+                best_obj = obj
+                best_hi = float(hi)
+                best_metrics = mets
+        self.trade_hi = float(best_hi)
+        self.trade_lo = float(1.0 - best_hi)
+        self.profit_metrics_test = best_metrics or {'sharpe': 0.0, 'total_return': 0.0, 'max_drawdown': 0.0, 'win_rate': 0.0, 'avg_trade_return': 0.0, 'n_trades': 0}
+        print(f"✓ Trading band selected: lo={self.trade_lo:.2f}, hi={self.trade_hi:.2f} (optimize_for={self.optimize_for})")
+
+        # Metrics and feature importance
+        if self.model_type == 'ensemble':
+            y_train_pred = (self._predict_proba(X_train_selected)[:, 1] >= 0.5).astype(int)
+        else:
+            y_train_pred = self.model.predict(X_train_selected)
         y_test_pred = (y_test_proba[:, 1] >= self.optimal_threshold).astype(int)
-        
-        # Calculate metrics
         train_accuracy = accuracy_score(y_train, y_train_pred)
         test_accuracy = accuracy_score(y_test, y_test_pred)
-        
         print(f"✅ Training Accuracy: {train_accuracy*100:.2f}%")
         print(f"✅ Test Accuracy: {test_accuracy*100:.2f}% (with optimized threshold)")
-        
-        # Per-class accuracy
+
         up_mask = y_test == 1
         down_mask = y_test == 0
         up_acc = accuracy_score(y_test[up_mask], y_test_pred[up_mask]) if up_mask.sum() > 0 else 0
         down_acc = accuracy_score(y_test[down_mask], y_test_pred[down_mask]) if down_mask.sum() > 0 else 0
         print(f"   UP accuracy: {up_acc*100:.1f}%, DOWN accuracy: {down_acc*100:.1f}%")
-        
-        # Feature importance
-        if hasattr(self.model, 'feature_importances_'):
-            feature_importance = pd.DataFrame({
-                'feature': self.selected_features,
-                'importance': self.model.feature_importances_
-            }).sort_values('importance', ascending=False)
-        else:
-            # For logistic regression (CalibratedClassifierCV)
+
+        if self.model_type == 'ensemble':
+            importances = []
+            rf = self.ensemble_models.get('rf')
+            if hasattr(rf, 'feature_importances_'):
+                importances.append(rf.feature_importances_)
+            xgb_m = self.ensemble_models.get('xgb')
+            if hasattr(xgb_m, 'feature_importances_'):
+                importances.append(xgb_m.feature_importances_)
+            logit = self.ensemble_models.get('logit')
+            try:
+                base_estimator = logit.calibrated_classifiers_[0].estimator
+                if hasattr(base_estimator, 'coef_'):
+                    importances.append(np.abs(base_estimator.coef_[0]))
+            except Exception:
+                pass
+            arr = np.vstack(importances) if len(importances) else np.zeros((1, len(self.selected_features)))
+            mean_imp = arr.mean(axis=0)
+            feature_importance = pd.DataFrame({'feature': self.selected_features, 'importance': mean_imp}).sort_values('importance', ascending=False)
+        elif hasattr(self.model, 'feature_importances_'):
+            feature_importance = pd.DataFrame({'feature': self.selected_features, 'importance': self.model.feature_importances_}).sort_values('importance', ascending=False)
+        elif isinstance(self.model, CalibratedClassifierCV):
             base_estimator = self.model.calibrated_classifiers_[0].estimator
             if hasattr(base_estimator, 'coef_'):
-                feature_importance = pd.DataFrame({
-                    'feature': self.selected_features,
-                    'importance': np.abs(base_estimator.coef_[0])
-                }).sort_values('importance', ascending=False)
+                feature_importance = pd.DataFrame({'feature': self.selected_features, 'importance': np.abs(base_estimator.coef_[0])}).sort_values('importance', ascending=False)
             else:
-                feature_importance = pd.DataFrame({
-                    'feature': self.selected_features,
-                    'importance': [0] * len(self.selected_features)
-                })
-        
+                feature_importance = pd.DataFrame({'feature': self.selected_features, 'importance': [0] * len(self.selected_features)})
+        elif isinstance(self.model, MLPClassifier) and hasattr(self.model, 'coefs_') and len(self.model.coefs_) > 0:
+            # Heuristic importance: mean absolute weights from input to first hidden layer
+            first_layer_weights = self.model.coefs_[0]  # shape: (n_features, n_hidden)
+            imp = np.mean(np.abs(first_layer_weights), axis=1)
+            feature_importance = pd.DataFrame({'feature': self.selected_features, 'importance': imp}).sort_values('importance', ascending=False)
+        else:
+            feature_importance = pd.DataFrame({'feature': self.selected_features, 'importance': [0] * len(self.selected_features)})
+
         return {
             'train_accuracy': train_accuracy,
             'test_accuracy': test_accuracy,
@@ -408,7 +486,9 @@ class AIPricePredictor:
             'confusion_matrix': confusion_matrix(y_test, y_test_pred),
             'y_test': y_test,
             'y_pred': y_test_pred,
-            'test_dates': df_prepared.index[test_idx]
+            'test_dates': df_prepared.index[test_idx],
+            'trading_band': {'lo': self.trade_lo, 'hi': self.trade_hi},
+            'profit_metrics_test': self.profit_metrics_test
         }
     
     def predict_next(self, df: pd.DataFrame, current_idx: int, threshold: float = 0.5) -> Tuple[int, float]:
@@ -435,7 +515,7 @@ class AIPricePredictor:
         current_selected = self.selector.transform(current_scaled)
         
         # Predict probabilities
-        proba = self.model.predict_proba(current_selected)[0]
+        proba = self._predict_proba(current_selected)[0]
         
         # Use custom threshold instead of 0.5
         # proba[1] is probability of UP (class 1)
@@ -467,7 +547,10 @@ class AIPricePredictor:
         
         print(f"🔄 Running backtest from index {start_idx} to {len(df_prepared)}...")
         print(f"Using optimal threshold: {getattr(self, 'optimal_threshold', 0.5):.2f}")
+        print(f"Using trading band: lo={self.trade_lo:.2f}, hi={self.trade_hi:.2f}, cost={self.transaction_cost:.4f}")
         
+        prev_action = 0
+        equity = 1.0
         for idx in range(start_idx, len(df_prepared) - self.prediction_horizon):
             # Get actual values at prediction horizon
             current_price = float(df_prepared.iloc[idx]['close'])
@@ -488,10 +571,37 @@ class AIPricePredictor:
                 price_change_pct = abs((future_price - current_price) / current_price) * 100
                 actual_direction = 1 if price_change_pct > 2.0 else 0
             
-            # Predict using optimal threshold
+            # Predict probability of UP
+            current_features = np.array(df_prepared.iloc[idx][self.feature_columns]).reshape(1, -1)
+            current_scaled = self.scaler.transform(current_features)
+            current_selected = self.selector.transform(current_scaled)
+            proba = self._predict_proba(current_selected)[0]
+            p_up = float(proba[1])
+            # Derive direction (for accuracy report)
             threshold = getattr(self, 'optimal_threshold', 0.5)
-            pred_direction, confidence = self.predict_next(df_prepared, idx, threshold=threshold)
-            
+            pred_direction = 1 if p_up >= threshold else 0
+            confidence = max(p_up, 1 - p_up)
+            # Trading action with abstention band
+            if p_up >= self.trade_hi:
+                action = 1
+            elif p_up <= self.trade_lo:
+                action = -1
+            else:
+                action = 0
+            # Compute step return and transaction costs
+            step_ret = (future_price - current_price) / current_price
+            trade_ret = action * step_ret
+            # Costs on position change (entry/exit)
+            trade_cost = 0.0
+            if action != prev_action:
+                if action != 0:
+                    trade_cost += self.transaction_cost
+                if prev_action != 0 and action == 0:
+                    trade_cost += self.transaction_cost
+            net_ret = trade_ret - trade_cost
+            equity *= (1.0 + net_ret)
+            prev_action = action
+
             results.append({
                 'timestamp': df_prepared.index[idx],
                 'current_price': current_price,
@@ -499,13 +609,27 @@ class AIPricePredictor:
                 'actual_direction': actual_direction,
                 'predicted_direction': pred_direction,
                 'confidence': confidence,
-                'correct': actual_direction == pred_direction
+                'correct': actual_direction == pred_direction,
+                'p_up': p_up,
+                'action': action,
+                'step_return': step_ret,
+                'trade_return': trade_ret,
+                'net_return': net_ret,
+                'equity': equity
             })
         
         results_df = pd.DataFrame(results)
         accuracy = results_df['correct'].mean()
-        
-        print(f"✅ Backtest Accuracy: {accuracy*100:.2f}%")
+        # Profit metrics
+        n_trades = (results_df['action'].diff().fillna(0) != 0).sum()
+        valid = results_df['action'] != 0
+        step_sharpe = results_df['net_return'].mean() / results_df['net_return'].std(ddof=0) if results_df['net_return'].std(ddof=0) > 0 else 0.0
+        cum = results_df['equity']
+        peak = cum.cummax()
+        mdd = ((cum / peak) - 1.0).min() if len(cum) else 0.0
+        total_ret = cum.iloc[-1] - 1.0 if len(cum) else 0.0
+        win_rate = (results_df.loc[valid, 'net_return'] > 0).mean() if valid.any() else 0.0
+        print(f"✅ Backtest Accuracy: {accuracy*100:.2f}% | Trades: {int(n_trades)} | Sharpe(step): {step_sharpe:.2f} | Total Return: {total_ret*100:.2f}% | MDD: {mdd*100:.2f}% | Win rate: {win_rate*100:.1f}%")
         
         return results_df
     
@@ -639,6 +763,23 @@ class AIPricePredictor:
         if backtest_results is not None:
             backtest_accuracy = backtest_results['correct'].mean()
             print(f"   Backtest Accuracy:   {backtest_accuracy*100:.2f}%")
+            # Profit-aware metrics
+            valid = backtest_results['action'] != 0
+            trades = (backtest_results['action'].diff().fillna(0) != 0).sum()
+            step_sharpe = backtest_results['net_return'].mean() / backtest_results['net_return'].std(ddof=0) if backtest_results['net_return'].std(ddof=0) > 0 else 0.0
+            cum = backtest_results['equity']
+            peak = cum.cummax()
+            mdd = ((cum / peak) - 1.0).min() if len(cum) else 0.0
+            total_ret = cum.iloc[-1] - 1.0 if len(cum) else 0.0
+            win_rate = (backtest_results.loc[valid, 'net_return'] > 0).mean() if valid.any() else 0.0
+            print(f"\n💹 PROFIT METRICS (backtest):")
+            print(f"   Optimize for:      {self.optimize_for}")
+            print(f"   Trading band:      lo={self.trade_lo:.2f}, hi={self.trade_hi:.2f}, cost={self.transaction_cost:.4f}")
+            print(f"   Trades executed:   {int(trades)}")
+            print(f"   Step Sharpe:       {step_sharpe:.2f}")
+            print(f"   Total return:      {total_ret*100:.2f}%")
+            print(f"   Max drawdown:      {mdd*100:.2f}%")
+            print(f"   Win rate:          {win_rate*100:.1f}%")
         
         print(f"\n📋 CLASSIFICATION REPORT:")
         print(results['classification_report'])
